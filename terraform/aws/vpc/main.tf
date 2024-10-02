@@ -1,7 +1,7 @@
 terraform {
-  required_providers{
+  required_providers {
     aws = {
-      source = "hashicorp/aws"
+      source  = "hashicorp/aws"
       version = "~> 5.69"
     }
   }
@@ -10,7 +10,7 @@ terraform {
 resource "aws_iam_role" "ssm_role" {
   name = "ssm-role"
 
- assume_role_policy = jsonencode({
+  assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
@@ -49,19 +49,43 @@ resource "aws_vpc" "zona_b_vpc" {
 }
 
 resource "aws_subnet" "public_subnet_zona_a" {
-  provider          = aws.zona_a
-  vpc_id            = aws_vpc.zona_a_vpc.id
-  cidr_block        = var.public_subnet_cidr_zona_a
-  availability_zone = var.az_A
+  provider                = aws.zona_a
+  vpc_id                  = aws_vpc.zona_a_vpc.id
+  cidr_block              = var.public_subnet_cidr_zona_a
+  availability_zone       = var.az_A
   map_public_ip_on_launch = true
 }
 
 resource "aws_subnet" "public_subnet_zona_b" {
-  provider          = aws.zona_b
-  vpc_id            = aws_vpc.zona_b_vpc.id
-  cidr_block        = var.public_subnet_cidr_zona_b
-  availability_zone = var.az_B
+  provider                = aws.zona_b
+  vpc_id                  = aws_vpc.zona_b_vpc.id
+  cidr_block              = var.public_subnet_cidr_zona_b
+  availability_zone       = var.az_B
   map_public_ip_on_launch = true
+}
+
+resource "aws_subnet" "private_subnet_zona_a" {
+  provider          = aws.zona_a
+  count             = length(var.private_subnets_zona_a)
+  vpc_id            = aws_vpc.zona_a_vpc.id
+  cidr_block        = element(var.private_subnets_zona_a, count.index)
+  availability_zone = var.az_A
+
+  tags = {
+    Name = "private_subnets_zona_a_${count.index}"
+  }
+}
+
+resource "aws_subnet" "private_subnet_zona_b" {
+  provider          = aws.zona_b
+  count             = length(var.private_subnets_zona_b)
+  vpc_id            = aws_vpc.zona_b_vpc.id
+  cidr_block        = element(var.private_subnets_zona_b, count.index)
+  availability_zone = var.az_B
+
+  tags = {
+    Name = "private_subnets_zona_b_${count.index}"
+  }
 }
 
 resource "aws_internet_gateway" "igw_zona_a" {
@@ -130,14 +154,16 @@ resource "aws_security_group" "allow_traffic_zona_a" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = []
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
- egress {
-    from_port   = 3001
-    to_port     = 3001
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+    description      = "Allow traffic on all ports and ip ranges"
   }
 }
 
@@ -149,30 +175,31 @@ resource "aws_security_group" "allow_traffic_zona_b" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = []
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
- egress {
-    from_port   = 3001
-    to_port     = 3001
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+    description      = "Allow traffic on all ports and ip ranges"
   }
 }
 
 resource "aws_instance" "bia_zona_a" {
-  provider               = aws.zona_a
-  instance_type          = "t3.micro"
-  ami                    = var.ami_id_zona_a
-  subnet_id              = aws_subnet.public_subnet_zona_a.id
-  vpc_security_group_ids = [aws_security_group.allow_traffic_zona_a.id]
+  provider                    = aws.zona_a
+  instance_type               = "t3.micro"
+  ami                         = var.ami_id_zona_a
+  subnet_id                   = aws_subnet.public_subnet_zona_a.id
+  vpc_security_group_ids      = [aws_security_group.allow_traffic_zona_a.id]
+  associate_public_ip_address = true
 
   iam_instance_profile = aws_iam_instance_profile.ssm_instance_profile.name
 
   user_data = <<-EOF
               #!/bin/bash
-              sudo apt update -y
-              sudo apt install -y git curl
 
               if ! command -v amazon-ssm-agent &> /dev/null; then
                   echo "Instalando o SSM Agent..."
@@ -196,8 +223,6 @@ resource "aws_instance" "bia_zona_b" {
 
   user_data = <<-EOF
               #!/bin/bash
-              sudo apt update -y
-              sudo apt install -y git curl
 
               if ! command -v amazon-ssm-agent &> /dev/null; then
                   echo "Instalando o SSM Agent..."
@@ -208,4 +233,31 @@ resource "aws_instance" "bia_zona_b" {
               sudo systemctl enable amazon-ssm-agent
 
               EOF
+}
+
+resource "aws_vpc_endpoint" "vpc_ssm_vpce_zona_a" {
+  vpc_id              = aws_vpc.zona_a_vpc.id
+  service_name        = "com.amazonaws.${var.region_zona_a}.ssm"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.public_subnet_zona_a.id]
+  private_dns_enabled = true
+  security_group_ids  = [aws_security_group.allow_traffic_zona_a.id]
+}
+
+resource "aws_vpc_endpoint" "vpc_ec2messages_vpce" {
+  vpc_id              = aws_vpc.zona_a_vpc.id
+  service_name        = "com.amazonaws.${var.region_zona_a}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.public_subnet_zona_a.id]
+  private_dns_enabled = true
+  security_group_ids  = [aws_security_group.allow_traffic_zona_a.id]
+}
+
+resource "aws_vpc_endpoint" "vpc_ssmmessages_vpce" {
+  vpc_id              = aws_vpc.zona_a_vpc.id
+  service_name        = "com.amazonaws.${var.region_zona_a}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.public_subnet_zona_a.id]
+  private_dns_enabled = true
+  security_group_ids  = [aws_security_group.allow_traffic_zona_a.id]
 }
